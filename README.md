@@ -28,52 +28,80 @@ ADB (Android Debug Bridge) est l'outil principal pour communiquer avec l'apparei
 ```bash
 adb devices
 ```
-*Si la commande ne renvoie rien, vérifiez que l'émulateur est lancé.*
+<img width="769" height="94" alt="image" src="https://github.com/user-attachments/assets/d28976d3-b52c-4c60-bdc7-3ed7dd2ffafe" />
+
 
 ### 3. Installation de l'application de test
 ```bash
 adb install app-debug.apk
 ```
-*Définir 3 scénarios simples et répétables (ex: Ouvrir l'accueil, Rechercher un item, Ouvrir un détail) et les documenter avec des captures d'écran.*
 
----
+<img width="592" height="907" alt="image" src="https://github.com/user-attachments/assets/e107f15c-3668-4fec-b47d-fb9fffb72072" />
 
-## 🔓 Phase 2 : Rooting et Manipulation Système
+## 🔓 Phase 2 : Exploitation (Rooting) et Preuve d'Impact
 
-Le rooting modifie les protections et la confiance du système. Utile en laboratoire pour observer le stockage et analyser les comportements bas niveau, il augmente drastiquement la surface d'attaque.
+Le rooting modifie les protections fondamentales de l'OS. Pour démontrer ce risque (violation de la règle OWASP MASVS STORAGE-1), nous avons ciblé l'application `com.example.starsgallery` dans un environnement virtuel contrôlé (AVD "Google APIs").
 
-### Commandes de Rooting (Émulateur)
-```bash
-emulator -avd NOM_AVD -writable-system
-adb root                # Active le serveur adb en mode root
-adb remount             # Monte /system en lecture/écriture
+> **Note technique :** Les commandes ci-dessous ont été exécutées via PowerShell sous Windows. L'AVD a été préalablement lancé depuis le Device Manager d'Android Studio.
+
+### Étape 1 : Preuve d'isolation (Sandbox Active)
+Avant toute manipulation, nous vérifions que le système Android bloque l'accès aux données privées de l'application pour un utilisateur standard.
+
+```powershell
+.\adb shell id
+# Résultat : uid=2000(shell)
+.\adb shell "ls -l /data/data/com.example.starsgallery"
 ```
+*Le système renvoie une erreur `Permission denied`, prouvant que la Sandbox fonctionne.*
+<img width="1827" height="135" alt="image" src="https://github.com/user-attachments/assets/e0fc5781-499f-42a6-8195-77c5d36e17fa" />
 
-### Vérifications de l'état
-```bash
-adb shell id                                   # Chercher uid=0(root)
-adb shell getprop ro.boot.verifiedbootstate    # Attendu: "orange" ou "yellow" si modifié
-adb shell getprop ro.boot.veritymode           # Vérifier l'état de verity
-adb shell getprop ro.boot.vbmeta.device_state  # État du vbmeta
-adb shell "su -c id"                           # Tester la disponibilité de 'su'
+
+### Étape 2 : Élévation de privilèges et altération du système
+Nous exploitons l'environnement de développement pour passer Administrateur (`root`) et désactiver le mécanisme de vérification d'intégrité des fichiers (`dm-verity`).
+
+```powershell
+.\adb root
+.\adb remount
+.\adb disable-verity
 ```
+*Le serveur ADB redémarre avec les privilèges root et remonte la partition système en lecture/écriture.*
+<img width="889" height="90" alt="image" src="https://github.com/user-attachments/assets/906a2c4b-71bb-4dd9-ba1e-acb7eda4e27e" />
 
-### Option Permissive (Désactiver Verity)
-"Verity" vérifie l'intégrité du système de fichiers. Le désactiver permet des modifications mais supprime la garantie d'intégrité.
-```bash
-adb disable-verity
-adb reboot
-adb remount
+
+### Étape 3 : Post-exploitation (Contournement de la Sandbox)
+Avec nos nouveaux privilèges, nous retournons explorer le répertoire privé de l'application cible.
+
+```powershell
+.\adb shell id
+# Résultat : uid=0(root)
+.\adb shell "ls -l /data/data/com.example.starsgallery/"
 ```
+*La barrière de sécurité est tombée : nous pouvons désormais lister les dossiers internes tels que `databases`, `cache` ou `shared_prefs`.*
+<img width="1714" height="78" alt="image" src="https://github.com/user-attachments/assets/338c1ade-b618-4429-b6ed-4100c73438e0" />
 
-### Journalisation (Traçabilité)
-Toujours garder des traces de vos actions :
-```bash
-adb logcat -d | tail -n 200 > logcat_root_check.txt
+<img width="1138" height="116" alt="image" src="https://github.com/user-attachments/assets/024d7124-10cf-49a3-b0e7-fbd7432ead06" />
+
+### Étape 4 : Exfiltration de données sensibles
+Nous ciblons le dossier des préférences partagées pour y chercher les actions enregistrées par l'utilisateur (ici, la modification d'une note à 5 étoiles pour un acteur).
+
+```powershell
+.\adb shell "cat /data/data/com.example.starsgallery/shared_prefs/*.xml"
 ```
+*Succès de l'attaque : le fichier XML est lu et affiche les données sensibles en clair, prouvant le danger d'un stockage local non chiffré sur un appareil compromis.*
+<img width="1233" height="111" alt="image" src="https://github.com/user-attachments/assets/1ebe4662-4e25-41e1-8fea-ea29e06562dc" />
 
----
 
+### Étape 5 : Vérification de l'état d'intégrité (Verified Boot)
+Nous vérifions si le système a conscience que sa chaîne de confiance a été brisée par notre attaque.
+
+```powershell
+.\adb shell getprop ro.boot.verifiedbootstate
+.\adb shell getprop ro.boot.veritymode
+```
+*L'état renvoyé confirme que les protections de bas niveau (dm-verity) ont été désactivées.*
+<img width="990" height="86" alt="image" src="https://github.com/user-attachments/assets/1d36d42e-6fcd-44c8-a844-bafa73b6bb30" />
+
+Analyse du résultat : Le terminal ne renvoie aucune valeur. Sur cet environnement virtuel (AVD API 30 Google APIs), les propriétés matérielles de Verified Boot ne sont pas implémentées au niveau du bootloader virtuel, renvoyant des valeurs nulles. Sur un appareil physique de laboratoire, nous aurions attendu l'état orange (bootloader déverrouillé) et une modification de l'état dm-verity.
 ## 🛡️ Phase 3 : Concepts de Sécurité Android
 
 ### Architecture de Sécurité
@@ -134,10 +162,7 @@ Ne pas réinitialiser l'environnement compromet les tests futurs.
 ```bash
 adb emu avd stop
 adb emu avd wipe-data
-```
-*Preuve exigée : Capture d'écran de l'assistant initial Android au redémarrage.*
 
----
 
 ## 📚 Glossaire Rapide
 
